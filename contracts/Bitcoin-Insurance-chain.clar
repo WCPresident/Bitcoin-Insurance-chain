@@ -53,3 +53,63 @@
                           premium: premium-amount,
                           coverage: coverage-amount})
                   (ok "Policy initiated successfully")))))))
+
+
+;; Submit Premium to Activate/Renew Policy
+(define-public (submit-premium (insured principal))
+  (let ((policy-data (map-get? insurance-policies { insured-party: insured }))
+        (current-height stacks-block-height))
+    ;; Ensure principal is valid (not equal to tx-sender)
+    (if (is-eq insured tx-sender)
+        (err "Invalid insured principal")
+        ;; Ensure the policy exists
+        (if (is-some policy-data)
+            (let ((active-policy (unwrap! policy-data (err "Policy unwrap failed"))))
+              ;; Check if policy is inactive or due for renewal
+              (if (or (not (get policy-active active-policy))
+                      (<= (get policy-expiration active-policy) (+ current-height grace-period)))
+                  (begin
+                    ;; Transfer premium amount to the insurer
+                    (unwrap! (stx-transfer? (get policy-premium active-policy) tx-sender (get insurer active-policy)) (err "Transfer failed"))
+                    ;; Update the policy to active and set new expiration
+                    (map-set insurance-policies
+                      { insured-party: insured }
+                      (merge active-policy
+                             { policy-expiration: (+ current-height u52595),  ;; Approximately one year
+                               policy-active: true }))
+                    ;; Log the event
+                    (print {event: "premium-paid",
+                            insured-party: insured,
+                            premium: (get policy-premium active-policy),
+                            expiration: (+ current-height u52595)})
+                    (ok "Premium submitted and policy renewed successfully"))
+                  (err "Policy is active and not due for renewal")))
+            (err "Policy not found")))))
+
+;; public functions
+;;
+
+(define-public (submit-claim (insured principal) (claim-amount uint))
+  ;; Ensure principal and claim amount are valid
+  (if (or (is-eq insured tx-sender) (<= claim-amount u0))
+      (err "Invalid principal or claim amount")
+      (let ((policy-data (map-get? insurance-policies { insured-party: insured })))
+        (if (is-some policy-data)
+            (let ((active-policy (unwrap! policy-data (err "Policy unwrap failed"))))
+              ;; Check if policy is active and claim does not exceed coverage
+              (if (and (get policy-active active-policy)
+                       (<= (+ (get total-claims active-policy) claim-amount)
+                           (get policy-coverage active-policy)))
+                  (begin
+                    ;; Store the claim
+                    (map-set insurance-claims
+                      { insured-party: insured }
+                      { claim-requested: claim-amount,
+                        claim-approved: false })
+                    ;; Log the event
+                    (print {event: "claim-filed",
+                            insured-party: insured,
+                            claim-amount: claim-amount})
+                    (ok "Claim submitted successfully"))
+                  (err "Claim exceeds coverage or policy is inactive")))
+            (err "Policy not found")))))
