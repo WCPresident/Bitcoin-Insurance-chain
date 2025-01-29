@@ -54,7 +54,8 @@
                           coverage: coverage-amount})
                   (ok "Policy initiated successfully")))))))
 
-
+;; data maps
+;;
 ;; Submit Premium to Activate/Renew Policy
 (define-public (submit-premium (insured principal))
   (let ((policy-data (map-get? insurance-policies { insured-party: insured }))
@@ -113,3 +114,57 @@
                     (ok "Claim submitted successfully"))
                   (err "Claim exceeds coverage or policy is inactive")))
             (err "Policy not found")))))
+
+
+;;
+;;  Approve a Submitted Claim
+(define-public (approve-claim (insured principal))
+  ;; Ensure principal is valid
+  (if (is-eq insured tx-sender)
+      (err "Invalid insured principal")
+      (let ((claim-data (map-get? insurance-claims { insured-party: insured })))
+        (if (is-some claim-data)
+            (let ((filed-claim (unwrap! claim-data (err "Claim unwrap failed"))))
+              ;; Approve the claim
+              (map-set insurance-claims
+                { insured-party: insured }
+                { claim-requested: (get claim-requested filed-claim),
+                  claim-approved: true })
+              ;; Log the event
+              (print {event: "claim-approved",
+                      insured-party: insured,
+                      claim-amount: (get claim-requested filed-claim)})
+              (ok "Claim approved"))
+            (err "Claim not found")))))
+
+;;  Release Payout After Claim Approval
+(define-public (release-payout (insured principal))
+  ;; Ensure principal is valid
+  (if (is-eq insured tx-sender)
+      (err "Invalid insured principal")
+      (let ((claim-data (map-get? insurance-claims { insured-party: insured }))
+            (policy-data (map-get? insurance-policies { insured-party: insured })))
+        (if (and (is-some claim-data) (is-some policy-data))
+            (let ((approved-claim (unwrap! claim-data (err "Claim unwrap failed")))
+                  (policy (unwrap! policy-data (err "Policy unwrap failed"))))
+              ;; Check if the claim is approved
+              (if (is-eq (get claim-approved approved-claim) true)
+                  (let ((new-total-claims (+ (get total-claims policy) (get claim-requested approved-claim))))
+                    ;; Ensure total claims do not exceed coverage
+                    (if (<= new-total-claims (get policy-coverage policy))
+                        (begin
+                          ;; Update the policy's total claims
+                          (map-set insurance-policies
+                            { insured-party: insured }
+                            (merge policy { total-claims: new-total-claims }))
+                          ;; Transfer payout amount to the insured
+                          (unwrap! (stx-transfer? (get claim-requested approved-claim) (get insurer policy) insured) (err "Transfer failed"))
+                          ;; Log the event
+                          (print {event: "payout-released",
+                                  insured-party: insured,
+                                  payout-amount: (get claim-requested approved-claim)})
+                          (ok "Payout released successfully"))
+                        (err "Payout exceeds policy coverage")))
+                  (err "Claim not yet approved")))
+            (err "Claim or Policy not found")))))
+
