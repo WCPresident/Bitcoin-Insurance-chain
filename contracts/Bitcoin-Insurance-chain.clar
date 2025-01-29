@@ -168,3 +168,84 @@
                   (err "Claim not yet approved")))
             (err "Claim or Policy not found")))))
 
+
+;; Additional Data Maps
+(define-map policy-history
+  { insured-party: principal }
+  { total-premiums-paid: uint,
+    claim-history: (list 10 uint),
+    last-premium-payment: uint })
+
+(define-map risk-scores
+  { insured-party: principal }
+  { risk-score: uint,
+    last-assessment: uint })
+
+;; 1. Cancel Insurance Policy
+(define-public (cancel-policy (insured principal))
+  (let ((policy-data (map-get? insurance-policies { insured-party: insured })))
+    (begin
+      ;; Ensure only insurer or insured can cancel
+      (asserts! (or (is-eq tx-sender insured) 
+                    (is-eq tx-sender (get insurer (unwrap! policy-data (err "Policy not found")))))
+                (err "Unauthorized to cancel policy"))
+      ;; Check if policy exists and is active
+      (match policy-data
+        policy (if (get policy-active policy)
+                  (begin
+                    ;; Calculate refund amount based on remaining time
+                    (let ((remaining-blocks (- (get policy-expiration policy) stacks-block-height))
+                          (premium (get policy-premium policy))
+                          (refund-amount (/ (* premium remaining-blocks) u52595)))
+                      ;; Update policy status
+                      (map-set insurance-policies
+                        { insured-party: insured }
+                        (merge policy { policy-active: false }))
+                      ;; Process refund if applicable
+                      (if (> refund-amount u0)
+                          (unwrap! (stx-transfer? refund-amount 
+                                                (get insurer policy) 
+                                                insured)
+                                  (err "Refund transfer failed"))
+                          true)
+                      ;; Log cancellation
+                      (print {event: "policy-cancelled",
+                              insured-party: insured,
+                              refund-amount: refund-amount})
+                      (ok "Policy cancelled successfully")))
+                  (err "Policy not active"))
+        (err "Policy not found")))))
+
+;; 2. Update Risk Assessment
+(define-public (update-risk-assessment (insured principal) (new-risk-score uint))
+  (let ((policy-data (map-get? insurance-policies { insured-party: insured })))
+    (begin
+      ;; Only insurer can update risk assessment
+      (asserts! (is-eq tx-sender (get insurer (unwrap! policy-data (err "Policy not found"))))
+                (err "Unauthorized to update risk assessment"))
+      ;; Validate risk score (assuming 1-100 scale)
+      (asserts! (and (>= new-risk-score u1) (<= new-risk-score u100))
+                (err "Invalid risk score"))
+      ;; Update risk score
+      (map-set risk-scores
+        { insured-party: insured }
+        { risk-score: new-risk-score,
+          last-assessment: stacks-block-height })
+      ;; Adjust premium based on risk score if needed
+      (match policy-data
+        policy (let ((new-premium (adjust-premium-by-risk new-risk-score 
+                                                         (get policy-premium policy))))
+                (map-set insurance-policies
+                  { insured-party: insured }
+                  (merge policy { policy-premium: new-premium }))
+                (print {event: "risk-assessment-updated",
+                        insured-party: insured,
+                        new-risk-score: new-risk-score,
+                        new-premium: new-premium})
+                (ok "Risk assessment updated"))
+        (err "Policy not found")))))
+
+;; Helper function for risk-based premium adjustment
+(define-private (adjust-premium-by-risk (risk-score uint) (current-premium uint))
+  (let ((risk-factor (/ risk-score u50)))  ;; Normalize risk score
+    (* current-premium risk-factor)))
