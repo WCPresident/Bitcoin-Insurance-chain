@@ -249,3 +249,68 @@
 (define-private (adjust-premium-by-risk (risk-score uint) (current-premium uint))
   (let ((risk-factor (/ risk-score u50)))  ;; Normalize risk score
     (* current-premium risk-factor)))
+
+
+
+    ;; Helper function to validate payment schedule
+    (define-private (validate-payment-schedule (payments (list 12 uint)) (total uint))
+        (is-eq (fold + payments u0) total))
+
+    ;; Additional data map for payment schedules
+    (define-map payment-schedules
+        { insured-party: principal }
+        { scheduled-payments: (list 12 uint),
+          next-payment-block: uint })
+
+
+    ;;  Get Policy Details - Allow users to query policy information
+    (define-read-only (get-policy-details (insured principal))
+      (let ((policy-data (map-get? insurance-policies { insured-party: insured })))
+        (if (is-some policy-data)
+            (ok (unwrap-panic policy-data))
+            (err "Policy not found"))))
+
+    ;;  Calculate Renewal Premium - Adjust premium based on claim history
+    (define-public (calculate-renewal-premium (insured principal))
+      (let ((policy-data (map-get? insurance-policies { insured-party: insured }))
+            (risk-data (map-get? risk-scores { insured-party: insured })))
+        (if (and (is-some policy-data) (is-some risk-data))
+            (let ((policy (unwrap! policy-data (err "Policy not found")))
+                  (risk-info (unwrap! risk-data (err "Risk data not found"))))
+              (let ((claim-ratio (/ (get total-claims policy) (get policy-coverage policy)))
+                    (base-premium (get policy-premium policy))
+                    (risk-factor (/ (get risk-score risk-info) u50)))
+                ;; Calculate new premium based on claim ratio and risk score
+                (let ((claim-adjustment (if (> claim-ratio u0)
+                                           (+ u1 (* claim-ratio u2))  ;; Up to 3x increase based on claims
+                                           u1))
+                      (risk-adjustment risk-factor))
+                  (let ((new-premium (* base-premium (* claim-adjustment risk-adjustment))))
+                    (ok { 
+                      base-premium: base-premium,
+                      new-premium: new-premium,
+                      claim-ratio: claim-ratio,
+                      risk-factor: risk-factor
+                    })))))
+            (err "Policy or risk data not found"))))
+
+    ;;  Generate Policy Statistics - Provide insights on policy performance
+    (define-read-only (get-policy-statistics (insured principal))
+      (let ((policy-data (map-get? insurance-policies { insured-party: insured }))
+            (current-height stacks-block-height))
+        (if (is-some policy-data)
+            (let ((policy (unwrap-panic policy-data)))
+              (let ((remaining-days (if (> (get policy-expiration policy) current-height)
+                                       (/ (- (get policy-expiration policy) current-height) u144)  ;; Convert blocks to days (approx)
+                                       u0))
+                    (coverage-used-percentage (if (> (get policy-coverage policy) u0)
+                                                 (/ (* (get total-claims policy) u100) (get policy-coverage policy))
+                                                 u0)))
+                (ok {
+                  policy-active: (get policy-active policy),
+                  remaining-days: remaining-days,
+                  coverage-used: (get total-claims policy),
+                  coverage-used-percentage: coverage-used-percentage,
+                  coverage-remaining: (- (get policy-coverage policy) (get total-claims policy))
+                })))
+            (err "Policy not found"))))
